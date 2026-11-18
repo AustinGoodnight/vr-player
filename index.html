@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>Cardboard VR Player</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; overflow: hidden;
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; }
+  #menu { position: fixed; inset: 0; overflow-y: auto; padding: 20px 18px 40px;
+    background: linear-gradient(rgba(0,0,0,.82), rgba(0,0,0,.92)); }
+  #menu.hidden { display: none; }
+  .wrap { max-width: 460px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 4px 0 14px; font-weight: 650; letter-spacing: .2px; }
+  .card { background: #151515; border: 1px solid #262626; border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .file { display: block; text-align: center; padding: 14px; border-radius: 10px; background: #222; border: 1px dashed #444; cursor: pointer; }
+  .file input { display: none; }
+  #fname { margin-top: 8px; font-size: 13px; color: #9a9a9a; word-break: break-all; }
+  #warn { margin-top: 6px; font-size: 13px; color: #f0b43c; }
+  #info { margin-top: 6px; font-size: 13px; color: #bbb; }
+  b.ok { color: #6fd38a; } b.bad { color: #ff7a6b; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0; }
+  .row > span { color: #bbb; }
+  .seg { display: flex; background: #222; border-radius: 9px; padding: 3px; }
+  .seg button { border: 0; background: transparent; color: #bbb; padding: 7px 11px; border-radius: 7px; font: inherit; font-size: 14px; }
+  .seg button.on { background: #e8e8e8; color: #000; font-weight: 600; }
+  input[type=range] { flex: 1; max-width: 220px; accent-color: #e8e8e8; }
+  .val { width: 44px; text-align: right; color: #9a9a9a; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .transport { display: flex; align-items: center; gap: 10px; }
+  .transport input { max-width: none; }
+  #time { font-size: 12px; color: #9a9a9a; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  button.big { width: 100%; padding: 15px; font: inherit; font-size: 17px; font-weight: 650; border: 0; border-radius: 12px;
+    background: #fff; color: #000; margin-top: 4px; }
+  button.big:disabled { opacity: .35; }
+  button.small { border: 0; background: #2a2a2a; color: #eee; padding: 8px 12px; border-radius: 8px; font: inherit; font-size: 14px; }
+  label.chk { display: flex; align-items: center; gap: 8px; color: #bbb; }
+  .hint { font-size: 13px; color: #8a8a8a; margin-top: 10px; }
+  details summary { color: #bbb; cursor: pointer; }
+  #toast { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); background: rgba(0,0,0,.7);
+    padding: 8px 14px; border-radius: 8px; font-size: 14px; pointer-events: none; opacity: 0; transition: opacity .25s; }
+  #toast.show { opacity: 1; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="toast"></div>
+
+<div id="menu">
+ <div class="wrap">
+  <h1>Cardboard VR Player</h1>
+
+  <div class="card" id="diag" style="font-size:13px;color:#aaa">Checking sensors…</div>
+
+  <div class="card">
+    <label class="file">Choose a video<input type="file" id="file" accept="video/*"></label>
+    <div id="fname">No video loaded</div>
+    <div id="info"></div>
+    <div id="warn"></div>
+  </div>
+
+  <div class="card">
+    <div class="row"><span>Projection</span>
+      <div class="seg" id="proj"><button data-v="180">180°</button><button data-v="360">360°</button><button data-v="fisheye">Fisheye</button></div></div>
+    <div class="row" id="fishRow"><span>Fisheye angle</span><input type="range" id="fishFov" min="160" max="230" step="1"><span class="val" id="fishFovV"></span></div>
+    <div class="row"><span>Stereo</span>
+      <div class="seg" id="stereo"><button data-v="sbs">Side-by-side</button><button data-v="tb">Top/bottom</button><button data-v="mono">Mono</button></div></div>
+    <div class="row"><label class="chk"><input type="checkbox" id="swap"> Swap eyes</label></div>
+    <div class="hint">Filenames tagged like <code>_180_LR</code>, <code>_360_TB</code>, <code>_SBS</code>, <code>_mono</code> set these automatically.</div>
+  </div>
+
+  <div class="card">
+    <div class="transport">
+      <button class="small" id="play">Play</button>
+      <input type="range" id="seek" min="0" max="1000" value="0">
+      <span id="time">0:00 / 0:00</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Viewer tuning</summary>
+      <div class="row"><span>Field of view</span><input type="range" id="fov" min="50" max="120" step="1"><span class="val" id="fovV"></span></div>
+      <div class="row"><span>Lens correction</span><input type="range" id="k1" min="0" max="0.8" step="0.01"><span class="val" id="k1V"></span></div>
+      <div class="row"><span>Lens spacing</span><input type="range" id="sp" min="-0.3" max="0.3" step="0.005"><span class="val" id="spV"></span></div>
+      <div class="hint">Lens correction pre-warps the image for the viewer's lenses (0 = off). Spacing moves each eye's image toward (+) or away from (−) the center so it lines up with your lenses.</div>
+      <div class="row"><button class="small" id="reset">Reset tuning</button></div>
+    </details>
+  </div>
+
+  <button class="big" id="go" disabled>Enter VR</button>
+  <div class="hint">In VR: <b>tap</b> = play/pause · <b>double-tap</b> = recenter · <b>Back</b> = this menu.<br>Drag the preview behind this menu to look around.</div>
+ </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+THREE.ColorManagement.enabled = false; // pass video pixels straight through, no color conversion
+
+const $ = id => document.getElementById(id);
+
+// ---------- settings ----------
+const DEFAULTS = { proj: '180', stereo: 'sbs', swap: false, fov: 90, k1: 0.25, sp: 0, fishFov: 190 };
+let S = { ...DEFAULTS };
+try { Object.assign(S, JSON.parse(localStorage.getItem('cbvr') || '{}')); } catch {}
+const save = () => { try { localStorage.setItem('cbvr', JSON.stringify(S)); } catch {} };
+
+// ---------- renderer / scene ----------
+const canvas = $('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.autoClear = false;
+
+const video = document.createElement('video');
+video.playsInline = true; video.loop = true; video.preload = 'auto';
+video.setAttribute('playsinline', '');
+
+const tex = new THREE.VideoTexture(video);
+tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter; tex.generateMipmaps = false;
+
+const scene = new THREE.Scene();
+const matL = new THREE.MeshBasicMaterial({ map: tex });
+const matR = new THREE.MeshBasicMaterial({ map: tex });
+const meshL = new THREE.Mesh(new THREE.BufferGeometry(), matL);
+const meshR = new THREE.Mesh(new THREE.BufferGeometry(), matR);
+
+// ---------- oversize videos: crop each eye into its own canvas so it fits the GPU texture limit ----------
+let split = false, eyes = [], lastT = -1, needDraw = true;
+function makeEye() {
+  const c = document.createElement('canvas');
+  const t = new THREE.CanvasTexture(c);
+  t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = false;
+  return { c, ctx: c.getContext('2d', { alpha: false, desynchronized: true }), t, rect: [0, 0, 1, 1] };
+}
+function setupTextures() {
+  const vw = video.videoWidth, vh = video.videoHeight, max = renderer.capabilities.maxTextureSize;
+  split = !!vw && (vw > max || vh > max);
+  if (!split) { matL.map = matR.map = tex; matL.needsUpdate = matR.needsUpdate = true; return; }
+  if (!eyes.length) eyes = [makeEye(), makeEye()];
+  for (let eye = 0; eye < 2; eye++) {
+    const src = S.swap ? 1 - eye : eye;
+    const r = S.stereo === 'sbs' ? [src * vw / 2, 0, vw / 2, vh]
+            : S.stereo === 'tb'  ? [0, src * vh / 2, vw, vh / 2]   // top half = left eye
+            : [0, 0, vw, vh];
+    const k = Math.min(1, max / r[2], max / r[3]);
+    const E = eyes[eye], cw = Math.floor(r[2] * k), ch = Math.floor(r[3] * k);
+    E.rect = r;
+    if (E.c.width !== cw || E.c.height !== ch) { E.c.width = cw; E.c.height = ch; E.t.dispose(); }
+  }
+  matL.map = eyes[0].t;
+  matR.map = S.stereo === 'mono' ? eyes[0].t : eyes[1].t;
+  matL.needsUpdate = matR.needsUpdate = true;
+  needDraw = true;
+}
+function drawSplit() {
+  if (!split || video.readyState < 2) return;
+  if (!needDraw && video.currentTime === lastT) return;
+  lastT = video.currentTime; needDraw = false;
+  const n = S.stereo === 'mono' ? 1 : 2;
+  for (let i = 0; i < n; i++) {
+    const E = eyes[i], r = E.rect;
+    E.ctx.drawImage(video, r[0], r[1], r[2], r[3], 0, 0, E.c.width, E.c.height);
+    E.t.needsUpdate = true;
+  }
+}
+video.addEventListener('seeked', () => { needDraw = true; });
+video.addEventListener('loadeddata', () => { needDraw = true; });
+meshL.layers.set(1); meshR.layers.set(2);
+meshL.rotation.y = meshR.rotation.y = -Math.PI / 2; // put the image center straight ahead (-Z)
+scene.add(meshL, meshR);
+
+function buildGeo(eye) {
+  const g = S.proj === '180'
+    ? new THREE.SphereGeometry(100, 96, 64, Math.PI / 2, Math.PI)
+    : new THREE.SphereGeometry(100, 128, 64);
+  g.scale(-1, 1, 1); // view from inside
+  const uv = g.attributes.uv;
+  if (S.proj === 'fisheye') {
+    // equidistant fisheye: angle from straight ahead maps linearly to radius in each eye's square
+    const pos = g.attributes.position, half = (S.fishFov || 190) / 2 * Math.PI / 180;
+    for (let i = 0; i < uv.count; i++) {
+      const dx = -pos.getZ(i), dy = pos.getY(i), dz = pos.getX(i); // world direction after the mesh's -90° Y rotation
+      const len = Math.hypot(dx, dy, dz);
+      const theta = Math.acos(Math.max(-1, Math.min(1, -dz / len)));
+      if (theta > half) { uv.setXY(i, 0, 0); continue; } // outside the lens circle → black corner
+      const rho = Math.hypot(dx, dy) || 1, r = 0.5 * theta / half;
+      uv.setXY(i, 0.5 + r * dx / rho, 0.5 + r * dy / rho);
+    }
+  }
+  const e = S.swap ? 1 - eye : eye; // 0 = left eye
+  if (!split) for (let i = 0; i < uv.count; i++) { // in split mode each eye already has its own cropped texture
+    let u = uv.getX(i), v = uv.getY(i);
+    if (S.stereo === 'sbs') u = u * 0.5 + (e ? 0.5 : 0);
+    else if (S.stereo === 'tb') v = v * 0.5 + (e ? 0 : 0.5); // top half = left eye
+    uv.setXY(i, u, v);
+  }
+  uv.needsUpdate = true;
+  return g;
+}
+function rebuild() {
+  setupTextures();
+  meshL.geometry.dispose(); meshR.geometry.dispose();
+  meshL.geometry = buildGeo(0); meshR.geometry = buildGeo(1);
+}
+
+const camL = new THREE.PerspectiveCamera(S.fov, 1, 0.1, 1000); camL.layers.set(1);
+const camR = new THREE.PerspectiveCamera(S.fov, 1, 0.1, 1000); camR.layers.set(2);
+
+// ---------- lens pre-distortion pass ----------
+const rtOpts = { depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter };
+const rtL = new THREE.WebGLRenderTarget(1, 1, rtOpts);
+const rtR = new THREE.WebGLRenderTarget(1, 1, rtOpts);
+const postMat = new THREE.ShaderMaterial({
+  uniforms: { tMap: { value: null }, k1: { value: 0 }, k2: { value: 0 }, aspect: { value: 1 }, shift: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tMap; uniform float k1, k2, aspect, shift; varying vec2 vUv;
+    void main(){
+      vec2 p = vUv * 2.0 - 1.0;
+      p.x -= shift;                         // lens center offset within this eye's viewport
+      vec2 q = vec2(p.x * aspect, p.y);     // aspect-correct radius
+      float r2 = dot(q, q);
+      float f = 1.0 + k1 * r2 + k2 * r2 * r2;
+      vec2 s = p * f * 0.5 + 0.5;
+      if (s.x < 0.0 || s.x > 1.0 || s.y < 0.0 || s.y > 1.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+      gl_FragColor = texture2D(tMap, s);
+    }`,
+  depthTest: false, depthWrite: false
+});
+const postScene = new THREE.Scene();
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMat); quad.frustumCulled = false;
+postScene.add(quad);
+const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// ---------- head tracking ----------
+// Sources, best first: Generic Sensor API (RelativeOrientationSensor) → deviceorientation → deviceorientationabsolute
+let sensorQ = null, devOri = null, devOriAbs = null, haveOri = false, oriSource = 'none', sensorStatus = 'not started';
+function gotOri(src) {
+  const rank = { sensor: 3, rel: 2, abs: 1, none: 0 };
+  if (rank[src] > rank[oriSource]) {
+    const switching = haveOri;
+    oriSource = src; haveOri = true;
+    if (vr) setTimeout(recenter, switching ? 0 : 50);
+  }
+}
+addEventListener('deviceorientation', e => {
+  if (e.alpha == null && e.beta == null) return;
+  devOri = e; gotOri('rel');
+});
+addEventListener('deviceorientationabsolute', e => {
+  if (e.alpha == null && e.beta == null) return;
+  devOriAbs = e; gotOri('abs');
+});
+function startSensor() {
+  if (!('RelativeOrientationSensor' in window)) { sensorStatus = 'not available in this browser'; return; }
+  try {
+    const s = new RelativeOrientationSensor({ frequency: 60, referenceFrame: 'device' });
+    s.addEventListener('reading', () => { sensorQ = s.quaternion; sensorStatus = 'running'; gotOri('sensor'); });
+    s.addEventListener('error', e => { sensorStatus = `${e.error.name}: ${e.error.message}`; });
+    s.start();
+    sensorStatus = 'starting…';
+  } catch (e) { sensorStatus = `${e.name}: ${e.message}`; }
+}
+startSensor();
+
+const Y = new THREE.Vector3(0, 1, 0), Z = new THREE.Vector3(0, 0, 1);
+const qX = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2); // -90° about X
+const qTmp = new THREE.Quaternion(), qS = new THREE.Quaternion(), qYaw = new THREE.Quaternion(), qHead = new THREE.Quaternion();
+const eul = new THREE.Euler();
+function screenAngle() {
+  return (screen.orientation && typeof screen.orientation.angle === 'number') ? screen.orientation.angle : (window.orientation || 0);
+}
+function deviceQuat(out) {
+  const d = THREE.MathUtils.DEG2RAD;
+  if (oriSource === 'sensor' && sensorQ) {
+    // sensor quaternion is device→world (Z-up); convert world to three.js Y-up
+    qS.set(sensorQ[0], sensorQ[1], sensorQ[2], sensorQ[3]);
+    out.copy(qX).multiply(qS);
+  } else {
+    const o = (oriSource === 'abs' ? devOriAbs : devOri) || { alpha: 0, beta: 0, gamma: 0 };
+    eul.set((o.beta || 0) * d, (o.alpha || 0) * d, -(o.gamma || 0) * d, 'YXZ');
+    out.setFromEuler(eul).multiply(qX);
+  }
+  return out.multiply(qTmp.setFromAxisAngle(Z, -screenAngle() * d));
+}
+
+// status line in the menu
+function updateDiag() {
+  const secure = window.isSecureContext;
+  const src = { sensor: 'orientation sensor', rel: 'deviceorientation', abs: 'deviceorientation (compass)', none: 'none' }[oriSource];
+  let html = `Page: <b class="${secure ? 'ok' : 'bad'}">${secure ? 'secure' : 'NOT secure'}</b> (${location.protocol.replace(':', '')}) · `
+    + `Head tracking: <b class="${haveOri ? 'ok' : 'bad'}">${haveOri ? 'working — ' + src : 'no data'}</b>`;
+  if (!haveOri) {
+    html += `<br>Sensor API: ${sensorStatus}.`;
+    if (!secure) html += `<br>Chrome only allows motion sensors on <b>https://</b> pages or files opened as <b>file:///</b> in the address bar. Opening it from a file manager or Downloads uses a content:// address, and that blocks the gyro.`;
+    else html += `<br>Check Chrome → ⋮ → Settings → Site settings → <b>Motion sensors</b> is allowed (also for this site).`;
+  }
+  $('diag').innerHTML = html;
+}
+setInterval(() => { if (!vr) updateDiag(); }, 500);
+// touch/mouse drag fallback (and preview look-around)
+let lon = 0, lat = 0;
+function headQuat(out) {
+  if (haveOri && vr) return out.copy(qYaw).multiply(deviceQuat(new THREE.Quaternion()));
+  eul.set(lat, lon, 0, 'YXZ');
+  return out.setFromEuler(eul);
+}
+function recenter() {
+  if (haveOri) {
+    const e = new THREE.Euler().setFromQuaternion(deviceQuat(new THREE.Quaternion()), 'YXZ');
+    qYaw.setFromAxisAngle(Y, -e.y);
+  }
+  lon = 0; lat = 0;
+  toast('Recentered');
+}
+
+// pointer: drag to look, tap = play/pause, double-tap = recenter
+let down = null, tapTimer = null;
+canvas.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, lon, lat, moved: false }; });
+canvas.addEventListener('pointermove', e => {
+  if (!down) return;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y;
+  if (Math.hypot(dx, dy) > 8) down.moved = true;
+  if (!(haveOri && vr)) {
+    const k = (S.fov * Math.PI / 180) / innerHeight;
+    lon = down.lon + dx * k; lat = Math.max(-1.5, Math.min(1.5, down.lat + dy * k));
+  }
+});
+canvas.addEventListener('pointerup', () => {
+  const wasTap = down && !down.moved; down = null;
+  if (!wasTap || !vr) return;
+  if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; recenter(); return; }
+  tapTimer = setTimeout(() => { tapTimer = null; togglePlay(); }, 280);
+});
+
+// ---------- VR mode ----------
+let vr = false, wakeLock = null;
+async function enterVR() {
+  if (!video.src) return;
+  vr = true; $('menu').classList.add('hidden');
+  try { if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission(); } catch {}
+  try { await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); } catch {}
+  try { await screen.orientation.lock('landscape'); } catch {}
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  video.play().catch(() => {});
+  setTimeout(recenter, 600); // after rotation settles
+  if (!haveOri) setTimeout(() => { if (!haveOri && vr) toast('No gyro data — drag to look'); }, 1500);
+}
+function exitVR() {
+  vr = false; $('menu').classList.remove('hidden');
+  video.pause();
+  try { wakeLock && wakeLock.release(); } catch {} wakeLock = null;
+  try { screen.orientation.unlock(); } catch {}
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && vr) exitVR(); });
+addEventListener('keydown', e => {
+  if (e.key === 'Escape' && vr) exitVR();
+  if (e.key === ' ' ) { e.preventDefault(); togglePlay(); }
+  if (e.key === 'r') recenter();
+});
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && vr && !wakeLock) { try { wakeLock = await navigator.wakeLock.request('screen'); } catch {} }
+});
+
+function togglePlay() {
+  if (!video.src) return;
+  if (video.paused) { video.play().catch(() => {}); if (vr) toast('Play'); }
+  else { video.pause(); if (vr) toast('Paused'); }
+}
+
+// ---------- render loop ----------
+function resize() { renderer.setSize(innerWidth, innerHeight, false); }
+addEventListener('resize', resize); resize();
+
+function render() {
+  const w = innerWidth, h = innerHeight;
+  drawSplit();
+  headQuat(qHead);
+  camL.quaternion.copy(qHead); camR.quaternion.copy(qHead);
+  renderer.setRenderTarget(null);
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, w, h);
+  renderer.clear();
+
+  if (!vr) { // mono preview behind the menu
+    camL.fov = S.fov; camL.aspect = w / h; camL.updateProjectionMatrix();
+    renderer.render(scene, camL);
+    return;
+  }
+
+  const ew = w / 2, pr = renderer.getPixelRatio();
+  const pw = Math.max(1, Math.round(ew * pr)), ph = Math.max(1, Math.round(h * pr));
+  if (rtL.width !== pw || rtL.height !== ph) { rtL.setSize(pw, ph); rtR.setSize(pw, ph); }
+  for (const c of [camL, camR]) { c.fov = S.fov; c.aspect = ew / h; c.updateProjectionMatrix(); }
+
+  renderer.setRenderTarget(rtL); renderer.clear(); renderer.render(scene, camL);
+  renderer.setRenderTarget(rtR); renderer.clear(); renderer.render(scene, camR);
+  renderer.setRenderTarget(null);
+
+  postMat.uniforms.k1.value = S.k1;
+  postMat.uniforms.k2.value = S.k1 * 0.9;
+  postMat.uniforms.aspect.value = ew / h;
+  renderer.setScissorTest(true);
+  // left eye
+  renderer.setViewport(0, 0, ew, h); renderer.setScissor(0, 0, ew, h);
+  postMat.uniforms.tMap.value = rtL.texture; postMat.uniforms.shift.value = S.sp;
+  renderer.render(postScene, postCam);
+  // right eye
+  renderer.setViewport(ew, 0, ew, h); renderer.setScissor(ew, 0, ew, h);
+  postMat.uniforms.tMap.value = rtR.texture; postMat.uniforms.shift.value = -S.sp;
+  renderer.render(postScene, postCam);
+  renderer.setScissorTest(false);
+}
+renderer.setAnimationLoop(render);
+
+// ---------- UI ----------
+function syncUI() {
+  for (const [id, key] of [['proj', 'proj'], ['stereo', 'stereo']])
+    for (const b of $(id).children) b.classList.toggle('on', b.dataset.v === S[key]);
+  $('swap').checked = S.swap;
+  $('fishRow').style.display = S.proj === 'fisheye' ? '' : 'none';
+  $('fishFov').value = S.fishFov; $('fishFovV').textContent = S.fishFov + '°';
+  $('fov').value = S.fov; $('fovV').textContent = S.fov + '°';
+  $('k1').value = S.k1; $('k1V').textContent = (+S.k1).toFixed(2);
+  $('sp').value = S.sp; $('spV').textContent = (+S.sp).toFixed(3);
+}
+for (const [id, key] of [['proj', 'proj'], ['stereo', 'stereo']]) {
+  $(id).addEventListener('click', e => {
+    const v = e.target.dataset && e.target.dataset.v; if (!v) return;
+    S[key] = v; save(); syncUI(); rebuild();
+  });
+}
+$('swap').addEventListener('change', e => { S.swap = e.target.checked; save(); rebuild(); });
+$('fishFov').addEventListener('input', e => { S.fishFov = parseInt(e.target.value, 10); save(); syncUI(); rebuild(); });
+for (const id of ['fov', 'k1', 'sp']) $(id).addEventListener('input', e => { S[id] = parseFloat(e.target.value); save(); syncUI(); });
+$('reset').addEventListener('click', () => { S.fov = DEFAULTS.fov; S.k1 = DEFAULTS.k1; S.sp = DEFAULTS.sp; save(); syncUI(); });
+
+function detectFromName(name) {
+  const t = new Set(name.toLowerCase().split(/[^a-z0-9]+/));
+  let found = false;
+  const n = name.toLowerCase();
+  if (/fish/.test(n)) {
+    S.proj = 'fisheye'; found = true;
+    const m = n.match(/(?:^|[^0-9])(1[6-9]0|2[0-3]0)(?:[^0-9]|$)/);
+    S.fishFov = m ? parseInt(m[1], 10) : 190;
+  }
+  else if (t.has('360') || t.has('vr360')) { S.proj = '360'; found = true; }
+  else if (t.has('180') || t.has('vr180')) { S.proj = '180'; found = true; }
+  if (['tb', 'ou', '3dv', 'overunder', 'topbottom'].some(k => t.has(k))) { S.stereo = 'tb'; found = true; }
+  else if (['lr', 'sbs', '3dh', 'sidebyside'].some(k => t.has(k))) { S.stereo = 'sbs'; found = true; }
+  else if (t.has('mono') || t.has('2d')) { S.stereo = 'mono'; found = true; }
+  if (t.has('rl')) { S.stereo = 'sbs'; S.swap = true; found = true; }
+  return found;
+}
+
+let objURL = null;
+$('file').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0]; if (!f) return;
+  if (objURL) URL.revokeObjectURL(objURL);
+  objURL = URL.createObjectURL(f);
+  video.src = objURL; video.load();
+  const auto = detectFromName(f.name);
+  save(); syncUI(); rebuild();
+  $('fname').textContent = f.name + (auto ? ' — format detected from filename' : '');
+  $('warn').textContent = ''; $('info').textContent = 'Reading codec info…';
+  $('go').disabled = false;
+  probe(f).then(showProbe).catch(() => { $('info').textContent = ''; });
+});
+
+// ---------- codec probe (reads the MP4/MOV header directly, works even when decoding fails) ----------
+const VCODECS = { avc1: 'H.264', avc3: 'H.264', hvc1: 'HEVC (H.265)', hev1: 'HEVC (H.265)', dvh1: 'Dolby Vision HEVC', dvhe: 'Dolby Vision HEVC',
+  av01: 'AV1', vp09: 'VP9', vp08: 'VP8', mp4v: 'MPEG-4 Part 2', apch: 'ProRes 422 HQ', apcn: 'ProRes 422', apcs: 'ProRes 422 LT',
+  apco: 'ProRes Proxy', ap4h: 'ProRes 4444', ap4x: 'ProRes 4444 XQ', 'jpeg': 'Motion JPEG', 'mjpa': 'Motion JPEG' };
+const ACODECS = { mp4a: 'AAC', 'ac-3': 'Dolby AC-3', 'ec-3': 'Dolby E-AC-3', Opus: 'Opus', lpcm: 'PCM', sowt: 'PCM', twos: 'PCM', 'fLaC': 'FLAC', '.mp3': 'MP3' };
+async function probe(file) {
+  const CH = 16 * 1024 * 1024;
+  const parts = [file.slice(0, CH)];
+  if (file.size > CH) parts.push(file.slice(Math.max(CH, file.size - CH)));
+  const found = { video: [], audio: [] };
+  for (const p of parts) {
+    const b = new Uint8Array(await p.arrayBuffer());
+    for (let i = 4; i < b.length - 40; i++) {
+      if (b[i] !== 0x73 || b[i + 1] !== 0x74 || b[i + 2] !== 0x73 || b[i + 3] !== 0x64) continue; // 'stsd'
+      const e = i + 12;
+      const cc = String.fromCharCode(b[e + 4], b[e + 5], b[e + 6], b[e + 7]);
+      if (VCODECS[cc]) found.video.push({ cc, name: VCODECS[cc], w: (b[e + 32] << 8) | b[e + 33], h: (b[e + 34] << 8) | b[e + 35] });
+      else if (ACODECS[cc]) found.audio.push({ cc, name: ACODECS[cc] });
+    }
+  }
+  return found;
+}
+function showProbe(p) {
+  const v = p.video[0], a = p.audio[0];
+  if (!v) { $('info').textContent = "Couldn't read codec info (not an MP4/MOV, or unusual file)."; return; }
+  $('info').innerHTML = `Video: <b>${v.name}</b> ${v.w}×${v.h}` + (a ? ` · Audio: ${a.name}` : '');
+  const notes = [];
+  const max = renderer.capabilities.maxTextureSize;
+  if (v.name.startsWith('ProRes')) notes.push('Android phones can’t decode ProRes. It needs re-encoding.');
+  if (v.cc === 'mp4v' || v.name === 'Motion JPEG') notes.push('Chrome on Android doesn’t play this codec. It needs re-encoding.');
+  if (v.name === 'H.264' && v.w > 4096) notes.push(`H.264 wider than 4096 px is past what most phone hardware decoders handle (${v.w} px here).`);
+  if (v.name.includes('HEVC') && v.w > 4096) notes.push(`HEVC above 4K (${v.w} px) only decodes on some flagship phones.`);
+  if (v.name.startsWith('Dolby')) notes.push('Dolby Vision often won’t play in Chrome.');
+  if (a && a.name.startsWith('Dolby')) notes.push('Chrome can’t play Dolby AC-3/E-AC-3 audio, so the file may fail or play silent.');
+  if (notes.length) $('warn').innerHTML = notes.join('<br>') + '<br>→ Re-encoding to 4096 px wide H.264 + AAC usually fixes it.';
+}
+video.addEventListener('loadedmetadata', () => {
+  const max = renderer.capabilities.maxTextureSize;
+  $('fname').textContent += ` · ${video.videoWidth}×${video.videoHeight}`;
+  rebuild(); // switches to per-eye split textures if the frame is bigger than the GPU allows
+  if (split) $('info').innerHTML += `<br><b class="ok">Over the ${max}px GPU limit — splitting into per-eye textures.</b>`;
+  updateTime();
+});
+video.addEventListener('error', () => {
+  const err = video.error;
+  const why = { 1: 'loading aborted', 2: 'read error', 3: 'decode failed', 4: 'format/codec not supported' }[err && err.code] || 'unknown error';
+  const line = `Chrome couldn't play this video: ${why}${err && err.message ? ` (${err.message})` : ''}.`;
+  $('warn').innerHTML = $('warn').innerHTML ? line + '<br>' + $('warn').innerHTML : line;
+});
+
+$('play').addEventListener('click', togglePlay);
+video.addEventListener('play', () => $('play').textContent = 'Pause');
+video.addEventListener('pause', () => $('play').textContent = 'Play');
+const fmt = s => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };
+let seeking = false;
+function updateTime() {
+  $('time').textContent = `${fmt(video.currentTime)} / ${fmt(video.duration)}`;
+  if (!seeking && video.duration) $('seek').value = Math.round(video.currentTime / video.duration * 1000);
+}
+video.addEventListener('timeupdate', updateTime);
+$('seek').addEventListener('input', e => { seeking = true; if (video.duration) video.currentTime = e.target.value / 1000 * video.duration; });
+$('seek').addEventListener('change', () => { seeking = false; });
+$('go').addEventListener('click', enterVR);
+
+let toastT;
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 900); }
+
+syncUI(); rebuild();
+</script>
+</body>
+</html>
