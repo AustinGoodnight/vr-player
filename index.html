@@ -78,7 +78,7 @@
   <div class="card">
     <div class="row"><span>Sharpening</span><input type="range" id="sharp" min="0" max="1" step="0.05"><span class="val" id="sharpV"></span></div>
     <div class="row"><label class="chk"><input type="checkbox" id="dwell"> Select in-VR menu items by holding your gaze</label></div>
-    <div class="hint">In VR, <b>look down</b> to open the controls: skim the timeline, skip, and adjust the view and sharpening. Point the dot at an item, then tap (or hold your gaze). Look back up to close.</div>
+    <div class="hint">In VR, <b>look up</b> to open the controls: skim the timeline, skip, and adjust the view and sharpening. Point the dot at an item, then tap (or hold your gaze). Look back down to close.</div>
   </div>
 
   <div class="card">
@@ -101,7 +101,7 @@
   </div>
 
   <button class="big" id="go" disabled>Enter VR</button>
-  <div class="hint">In VR: <b>look down</b> = controls · <b>tap</b> = play/pause · <b>double-tap</b> = recenter · <b>Back</b> = this menu.<br>Drag the preview behind this menu to look around.</div>
+  <div class="hint">In VR: <b>look up</b> = controls · <b>tap</b> = play/pause · <b>double-tap</b> = recenter · <b>Back</b> = this menu.<br>Drag the preview behind this menu to look around.</div>
  </div>
 </div>
 
@@ -395,9 +395,9 @@ function togglePlay() {
   else { video.pause(); if (vr) toast('Paused'); }
 }
 
-// ---------- in-VR look-down menu (gaze pointer; select by tap or by holding your gaze) ----------
+// ---------- in-VR look-up menu (gaze pointer; select by tap or by holding your gaze) ----------
 const PW = 1024, PH = 704, PANEL_W = 2.4, PANEL_H = PANEL_W * PH / PW, PANEL_D = 3;
-const OPEN_PITCH = -32, CLOSE_PITCH = -20, PANEL_PITCH = -46;  // degrees below the horizon
+const OPEN_PITCH = 32, CLOSE_PITCH = 20, PANEL_PITCH = 46;  // degrees above the horizon
 const DWELL_MS = 1000, DWELL_SEEK_MS = 1400, REPEAT_MS = 350;
 const pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
 const pg = pc.getContext('2d');
@@ -440,7 +440,7 @@ function hitTest(x, y) {
     return { id: r.id, pos: r.id === 'timeline' ? Math.max(0, Math.min(1, (x - BAR.x) / BAR.w)) : 0 };
   return null;
 }
-function placePanel() { // world-locked below the current gaze direction
+function placePanel() { // world-locked above the current gaze direction
   const yaw = Math.atan2(-fwd.x, -fwd.z), p = PANEL_PITCH * Math.PI / 180;
   panel.position.set(-Math.sin(yaw) * Math.cos(p), Math.sin(p), -Math.cos(yaw) * Math.cos(p)).multiplyScalar(PANEL_D);
   panel.lookAt(ORIGIN);
@@ -480,10 +480,10 @@ function updateMenu(now) {
   fwd.set(0, 0, -1).applyQuaternion(qHead);
   const pitch = Math.asin(Math.max(-1, Math.min(1, fwd.y))) * 180 / Math.PI;
   if (!menuOpen) {
-    if (pitch < OPEN_PITCH) { if (!downSince) downSince = now; else if (now - downSince > 300) openMenu(); }
+    if (pitch > OPEN_PITCH) { if (!downSince) downSince = now; else if (now - downSince > 300) openMenu(); }
     else downSince = 0;
     if (!menuOpen) return;
-  } else if (pitch > CLOSE_PITCH) { closeMenu(); return; }
+  } else if (pitch < CLOSE_PITCH) { closeMenu(); return; }
   if (replace) { replace = false; placePanel(); }
 
   reticle.position.copy(fwd).multiplyScalar(PANEL_D - 0.1); reticle.quaternion.copy(qHead);
@@ -548,7 +548,7 @@ function drawPanel(fl) {
     }
   }
   g.font = `28px ${F}`; g.fillStyle = '#8a8a8a'; g.textAlign = 'center';
-  g.fillText((S.dwell ? 'Tap, or hold your gaze, to select' : 'Tap to select') + ' · look up to close', PW / 2, 662);
+  g.fillText((S.dwell ? 'Tap, or hold your gaze, to select' : 'Tap to select') + ' · look down to close', PW / 2, 662);
 }
 
 // ---------- render loop ----------
