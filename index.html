@@ -76,6 +76,12 @@
   </div>
 
   <div class="card">
+    <div class="row"><span>Sharpening</span><input type="range" id="sharp" min="0" max="1" step="0.05"><span class="val" id="sharpV"></span></div>
+    <div class="row"><label class="chk"><input type="checkbox" id="dwell"> Select in-VR menu items by holding your gaze</label></div>
+    <div class="hint">In VR, <b>look down</b> to open the controls: skim the timeline, skip, and adjust the view and sharpening. Point the dot at an item, then tap (or hold your gaze). Look back up to close.</div>
+  </div>
+
+  <div class="card">
     <div class="transport">
       <button class="small" id="play">Play</button>
       <input type="range" id="seek" min="0" max="1000" value="0">
@@ -95,7 +101,7 @@
   </div>
 
   <button class="big" id="go" disabled>Enter VR</button>
-  <div class="hint">In VR: <b>tap</b> = play/pause · <b>double-tap</b> = recenter · <b>Back</b> = this menu.<br>Drag the preview behind this menu to look around.</div>
+  <div class="hint">In VR: <b>look down</b> = controls · <b>tap</b> = play/pause · <b>double-tap</b> = recenter · <b>Back</b> = this menu.<br>Drag the preview behind this menu to look around.</div>
  </div>
 </div>
 
@@ -106,7 +112,7 @@ THREE.ColorManagement.enabled = false; // pass video pixels straight through, no
 const $ = id => document.getElementById(id);
 
 // ---------- settings ----------
-const DEFAULTS = { proj: '180', stereo: 'sbs', swap: false, fov: 90, k1: 0.25, sp: 0, fishFov: 190 };
+const DEFAULTS = { proj: '180', stereo: 'sbs', swap: false, fov: 90, k1: 0.25, sp: 0, fishFov: 190, sharp: 0, dwell: true };
 let S = { ...DEFAULTS };
 try { Object.assign(S, JSON.parse(localStorage.getItem('cbvr') || '{}')); } catch {}
 const save = () => { try { localStorage.setItem('cbvr', JSON.stringify(S)); } catch {} };
@@ -218,10 +224,22 @@ const rtOpts = { depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: T
 const rtL = new THREE.WebGLRenderTarget(1, 1, rtOpts);
 const rtR = new THREE.WebGLRenderTarget(1, 1, rtOpts);
 const postMat = new THREE.ShaderMaterial({
-  uniforms: { tMap: { value: null }, k1: { value: 0 }, k2: { value: 0 }, aspect: { value: 1 }, shift: { value: 0 } },
+  uniforms: { tMap: { value: null }, k1: { value: 0 }, k2: { value: 0 }, aspect: { value: 1 }, shift: { value: 0 },
+    sharp: { value: 0 }, texel: { value: new THREE.Vector2(1, 1) } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
   fragmentShader: `
-    uniform sampler2D tMap; uniform float k1, k2, aspect, shift; varying vec2 vUv;
+    uniform sampler2D tMap; uniform float k1, k2, aspect, shift, sharp; uniform vec2 texel; varying vec2 vUv;
+    // contrast-adaptive sharpening: boosts soft edges more than already-sharp ones, so no bright halos
+    vec3 sharpen(vec2 s){
+      vec3 c = texture2D(tMap, s).rgb;
+      if (sharp <= 0.0) return c;
+      vec3 n = texture2D(tMap, s + vec2(0.0, texel.y)).rgb, so = texture2D(tMap, s - vec2(0.0, texel.y)).rgb;
+      vec3 e = texture2D(tMap, s + vec2(texel.x, 0.0)).rgb, w = texture2D(tMap, s - vec2(texel.x, 0.0)).rgb;
+      vec3 mn = min(c, min(min(n, so), min(e, w))), mx = max(c, max(max(n, so), max(e, w)));
+      vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, vec3(1e-4)), 0.0, 1.0));
+      vec3 wgt = -amp / mix(14.0, 5.0, sharp);
+      return clamp((c + (n + so + e + w) * wgt) / (1.0 + 4.0 * wgt), 0.0, 1.0);
+    }
     void main(){
       vec2 p = vUv * 2.0 - 1.0;
       p.x -= shift;                         // lens center offset within this eye's viewport
@@ -230,7 +248,7 @@ const postMat = new THREE.ShaderMaterial({
       float f = 1.0 + k1 * r2 + k2 * r2 * r2;
       vec2 s = p * f * 0.5 + 0.5;
       if (s.x < 0.0 || s.x > 1.0 || s.y < 0.0 || s.y > 1.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
-      gl_FragColor = texture2D(tMap, s);
+      gl_FragColor = vec4(sharpen(s), 1.0);
     }`,
   depthTest: false, depthWrite: false
 });
@@ -336,6 +354,7 @@ canvas.addEventListener('pointermove', e => {
 canvas.addEventListener('pointerup', () => {
   const wasTap = down && !down.moved; down = null;
   if (!wasTap || !vr) return;
+  if (menuOpen && hov) { act(hov, hovPos); resetDwell(); dw.id = hov; dw.locked = true; return; } // tap selects what the gaze dot is on
   if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; recenter(); return; }
   tapTimer = setTimeout(() => { tapTimer = null; togglePlay(); }, 280);
 });
@@ -354,7 +373,7 @@ async function enterVR() {
   if (!haveOri) setTimeout(() => { if (!haveOri && vr) toast('No gyro data — drag to look'); }, 1500);
 }
 function exitVR() {
-  vr = false; $('menu').classList.remove('hidden');
+  vr = false; closeMenu(); $('menu').classList.remove('hidden');
   video.pause();
   try { wakeLock && wakeLock.release(); } catch {} wakeLock = null;
   try { screen.orientation.unlock(); } catch {}
@@ -376,47 +395,203 @@ function togglePlay() {
   else { video.pause(); if (vr) toast('Paused'); }
 }
 
+// ---------- in-VR look-down menu (gaze pointer; select by tap or by holding your gaze) ----------
+const PW = 1024, PH = 704, PANEL_W = 2.4, PANEL_H = PANEL_W * PH / PW, PANEL_D = 3;
+const OPEN_PITCH = -32, CLOSE_PITCH = -20, PANEL_PITCH = -46;  // degrees below the horizon
+const DWELL_MS = 1000, DWELL_SEEK_MS = 1400, REPEAT_MS = 350;
+const pc = document.createElement('canvas'); pc.width = PW; pc.height = PH;
+const pg = pc.getContext('2d');
+const ptex = new THREE.CanvasTexture(pc); ptex.anisotropy = 4;
+const panel = new THREE.Mesh(new THREE.PlaneGeometry(PANEL_W, PANEL_H),
+  new THREE.MeshBasicMaterial({ map: ptex, transparent: true, depthTest: false, depthWrite: false }));
+const retMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, depthTest: false, depthWrite: false });
+const retDot = new THREE.Mesh(new THREE.CircleGeometry(0.016, 20), retMat);
+const retRing = new THREE.Mesh(new THREE.BufferGeometry(), retMat);
+const reticle = new THREE.Group(); reticle.add(retDot, retRing);
+panel.renderOrder = 10; retDot.renderOrder = retRing.renderOrder = 11;
+for (const o of [panel, retDot, retRing]) { o.layers.set(1); o.layers.enable(2); } // visible to both eye cameras
+panel.visible = reticle.visible = false;
+scene.add(panel, reticle);
+
+const SET = {
+  fov:   { step: 2,     min: 50,   max: 120, name: 'FOV',     fmt: v => v + '°' },
+  k1:    { step: 0.02,  min: 0,    max: 0.8, name: 'Lens',    fmt: v => v.toFixed(2) },
+  sp:    { step: 0.005, min: -0.3, max: 0.3, name: 'Spacing', fmt: v => v.toFixed(3) },
+  sharp: { step: 0.05,  min: 0,    max: 1,   name: 'Sharpen', fmt: v => Math.round(v * 100) + '%' },
+};
+const BAR = { x: 56, y: 124, w: 912, h: 28 };
+const RECTS = [{ id: 'timeline', x: 40, y: 96, w: 944, h: 84 }];
+['b30', 'b10', 'play', 'f10', 'f30'].forEach((id, i) => RECTS.push({ id, x: 56 + i * 185.6, y: 206, w: 169.6, h: 84 }));
+Object.keys(SET).forEach((k, i) => {
+  const x = 56 + (i % 2) * 464, y = 314 + (i >> 1) * 96;
+  RECTS.push({ id: k + '-', x: x + 168, y, w: 80, h: 80, key: k, lx: x }, { id: k + '+', x: x + 368, y, w: 80, h: 80, key: k });
+});
+['recenter', 'swap', 'proj', 'stereo'].forEach((id, i) => RECTS.push({ id, x: 56 + i * 232, y: 526, w: 216, h: 84 }));
+const REPEAT = new Set(['b30', 'b10', 'f10', 'f30', ...Object.keys(SET).flatMap(k => [k + '-', k + '+'])]);
+const LBL = { b30: '−30s', b10: '−10s', f10: '+10s', f30: '+30s', recenter: 'Recenter' };
+
+let menuOpen = false, downSince = 0, replace = false, hov = null, hovPos = 0, flash = null, panelSig = '', ringQ = -1;
+const dw = { id: null, pos: 0, t0: 0, fired: false, locked: false };
+const ray = new THREE.Raycaster(); ray.layers.set(1);
+const fwd = new THREE.Vector3(), ORIGIN = new THREE.Vector3();
+
+function hitTest(x, y) {
+  for (const r of RECTS) if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
+    return { id: r.id, pos: r.id === 'timeline' ? Math.max(0, Math.min(1, (x - BAR.x) / BAR.w)) : 0 };
+  return null;
+}
+function placePanel() { // world-locked below the current gaze direction
+  const yaw = Math.atan2(-fwd.x, -fwd.z), p = PANEL_PITCH * Math.PI / 180;
+  panel.position.set(-Math.sin(yaw) * Math.cos(p), Math.sin(p), -Math.cos(yaw) * Math.cos(p)).multiplyScalar(PANEL_D);
+  panel.lookAt(ORIGIN);
+}
+function setRing(p) { // dwell progress ring around the gaze dot
+  const q = Math.round(Math.max(0, Math.min(1, p)) * 40); if (q === ringQ) return; ringQ = q;
+  retRing.geometry.dispose();
+  retRing.geometry = q ? new THREE.RingGeometry(0.03, 0.045, 40, 1, Math.PI / 2, -q / 40 * Math.PI * 2) : new THREE.BufferGeometry();
+}
+function resetDwell() { dw.id = null; dw.fired = dw.locked = false; setRing(0); }
+function openMenu() { menuOpen = true; placePanel(); panel.visible = reticle.visible = true; resetDwell(); panelSig = ''; }
+function closeMenu() { menuOpen = false; panel.visible = reticle.visible = false; hov = null; downSince = 0; resetDwell(); }
+
+const cycle = (a, v) => a[(a.indexOf(v) + 1) % a.length];
+function act(id, pos) {
+  flash = { id, t: performance.now() };
+  const d = video.duration || 0;
+  const skip = s => { if (d) video.currentTime = Math.max(0, Math.min(d - 0.1, video.currentTime + s)); };
+  const m = /^(fov|k1|sp|sharp)([+-])$/.exec(id);
+  if (m) { const c = SET[m[1]]; S[m[1]] = +Math.max(c.min, Math.min(c.max, S[m[1]] + (m[2] === '+' ? c.step : -c.step))).toFixed(4); }
+  else switch (id) {
+    case 'timeline': if (d) video.currentTime = pos * d; break;
+    case 'b30': skip(-30); break;
+    case 'b10': skip(-10); break;
+    case 'f10': skip(10); break;
+    case 'f30': skip(30); break;
+    case 'play': togglePlay(); break;
+    case 'recenter': recenter(); replace = true; break;
+    case 'swap': S.swap = !S.swap; rebuild(); break;
+    case 'proj': S.proj = cycle(['180', '360', 'fisheye'], S.proj); rebuild(); break;
+    case 'stereo': S.stereo = cycle(['sbs', 'tb', 'mono'], S.stereo); rebuild(); break;
+  }
+  save(); syncUI();
+}
+
+function updateMenu(now) {
+  fwd.set(0, 0, -1).applyQuaternion(qHead);
+  const pitch = Math.asin(Math.max(-1, Math.min(1, fwd.y))) * 180 / Math.PI;
+  if (!menuOpen) {
+    if (pitch < OPEN_PITCH) { if (!downSince) downSince = now; else if (now - downSince > 300) openMenu(); }
+    else downSince = 0;
+    if (!menuOpen) return;
+  } else if (pitch > CLOSE_PITCH) { closeMenu(); return; }
+  if (replace) { replace = false; placePanel(); }
+
+  reticle.position.copy(fwd).multiplyScalar(PANEL_D - 0.1); reticle.quaternion.copy(qHead);
+  ray.set(ORIGIN, fwd);
+  const hit = ray.intersectObject(panel)[0];
+  const h = hit && hit.uv ? hitTest(hit.uv.x * PW, (1 - hit.uv.y) * PH) : null;
+  hov = h ? h.id : null; hovPos = h ? h.pos : 0;
+
+  let prog = 0;
+  if (S.dwell && hov) {
+    if (hov !== dw.id || (hov === 'timeline' && Math.abs(hovPos - dw.pos) > 0.02))
+      Object.assign(dw, { id: hov, pos: hovPos, t0: now, fired: false, locked: false });
+    if (!dw.locked) {
+      const need = dw.fired ? REPEAT_MS : hov === 'timeline' ? DWELL_SEEK_MS : DWELL_MS;
+      prog = (now - dw.t0) / need;
+      if (prog >= 1) { act(hov, dw.pos); dw.t0 = now; dw.fired = true; dw.locked = !REPEAT.has(hov); }
+      if (dw.fired) prog = 0; // no ring while auto-repeating
+    }
+  } else dw.id = null;
+  setRing(prog);
+
+  const fl = flash && now - flash.t < 160 ? flash.id : '';
+  const sig = [hov, hov === 'timeline' ? Math.round(hovPos * 400) : -1, Math.floor(video.currentTime), video.paused, fl,
+    S.fov, S.k1, S.sp, S.sharp, S.swap, S.proj, S.stereo, S.dwell].join();
+  if (sig !== panelSig) { panelSig = sig; drawPanel(fl); ptex.needsUpdate = true; }
+}
+
+function rr(x, y, w, h, r) { pg.beginPath(); if (pg.roundRect) pg.roundRect(x, y, w, h, r); else pg.rect(x, y, w, h); }
+function btnLabel(id) {
+  if (LBL[id]) return LBL[id];
+  if (id === 'play') return video.paused ? 'Play' : 'Pause';
+  if (id === 'swap') return S.swap ? 'Swap eyes ✓' : 'Swap eyes';
+  if (id === 'proj') return { '180': '180°', '360': '360°', fisheye: 'Fisheye' }[S.proj];
+  if (id === 'stereo') return { sbs: 'Side-by-side', tb: 'Top/bottom', mono: 'Mono' }[S.stereo];
+  return id.endsWith('+') ? '+' : '−';
+}
+function drawPanel(fl) {
+  const g = pg, d = video.duration || 0, t = video.currentTime || 0, F = 'system-ui, -apple-system, sans-serif';
+  g.clearRect(0, 0, PW, PH);
+  rr(0, 0, PW, PH, 40); g.fillStyle = 'rgba(14,14,14,0.9)'; g.fill();
+  g.textBaseline = 'middle';
+  g.font = `600 40px ${F}`; g.fillStyle = '#eee'; g.textAlign = 'left';
+  g.fillText(`${fmt(t)} / ${fmt(d)}`, BAR.x, 62);
+  rr(BAR.x, BAR.y, BAR.w, BAR.h, BAR.h / 2); g.fillStyle = '#333'; g.fill();
+  if (d) { rr(BAR.x, BAR.y, Math.max(BAR.h, BAR.w * t / d), BAR.h, BAR.h / 2); g.fillStyle = '#d8d8d8'; g.fill(); }
+  if (hov === 'timeline') {
+    const x = BAR.x + hovPos * BAR.w;
+    g.fillStyle = '#6fd38a'; g.fillRect(x - 4, BAR.y - 18, 8, BAR.h + 36);
+    g.textAlign = 'right'; g.fillText('Jump to ' + fmt(hovPos * d), BAR.x + BAR.w, 62);
+  }
+  g.textAlign = 'center';
+  for (const r of RECTS) {
+    if (r.id === 'timeline') continue;
+    const on = hov === r.id, pressed = fl === r.id, cy = r.y + r.h / 2 + 2;
+    rr(r.x, r.y, r.w, r.h, 18); g.fillStyle = pressed ? '#6fd38a' : on ? '#e8e8e8' : '#2a2a2a'; g.fill();
+    g.fillStyle = on || pressed ? '#000' : '#eee';
+    g.font = r.key ? `600 48px ${F}` : `600 32px ${F}`;
+    g.fillText(btnLabel(r.id), r.x + r.w / 2, cy, r.w - 16);
+    if (r.lx !== undefined) { // setting row: name on the left, value between − and +
+      g.font = `500 32px ${F}`; g.fillStyle = '#bbb'; g.textAlign = 'left'; g.fillText(SET[r.key].name, r.lx, cy, 160);
+      g.fillStyle = '#eee'; g.textAlign = 'center'; g.fillText(SET[r.key].fmt(S[r.key]), r.lx + 308, cy, 116);
+    }
+  }
+  g.font = `28px ${F}`; g.fillStyle = '#8a8a8a'; g.textAlign = 'center';
+  g.fillText((S.dwell ? 'Tap, or hold your gaze, to select' : 'Tap to select') + ' · look up to close', PW / 2, 662);
+}
+
 // ---------- render loop ----------
 function resize() { renderer.setSize(innerWidth, innerHeight, false); }
 addEventListener('resize', resize); resize();
 
+function fitRT(rt, w, h) { if (rt.width !== w || rt.height !== h) rt.setSize(w, h); }
+function postPass(rt, shift, k1, aspect) { // lens pre-warp + sharpening, rt → current viewport
+  const u = postMat.uniforms;
+  u.tMap.value = rt.texture; u.shift.value = shift; u.k1.value = k1; u.k2.value = k1 * 0.9; u.aspect.value = aspect;
+  u.sharp.value = S.sharp; u.texel.value.set(1 / rt.width, 1 / rt.height);
+  renderer.render(postScene, postCam);
+}
+
 function render() {
-  const w = innerWidth, h = innerHeight;
+  const w = innerWidth, h = innerHeight, pr = renderer.getPixelRatio();
   drawSplit();
   headQuat(qHead);
   camL.quaternion.copy(qHead); camR.quaternion.copy(qHead);
-  renderer.setRenderTarget(null);
+  if (vr) updateMenu(performance.now());
   renderer.setScissorTest(false);
-  renderer.setViewport(0, 0, w, h);
-  renderer.clear();
 
-  if (!vr) { // mono preview behind the menu
+  if (!vr) { // mono preview behind the menu (sharpened, no lens warp)
+    fitRT(rtL, Math.max(1, Math.round(w * pr)), Math.max(1, Math.round(h * pr)));
     camL.fov = S.fov; camL.aspect = w / h; camL.updateProjectionMatrix();
-    renderer.render(scene, camL);
+    renderer.setRenderTarget(rtL); renderer.clear(); renderer.render(scene, camL);
+    renderer.setRenderTarget(null); renderer.setViewport(0, 0, w, h); renderer.clear();
+    postPass(rtL, 0, 0, w / h);
     return;
   }
 
-  const ew = w / 2, pr = renderer.getPixelRatio();
+  const ew = w / 2;
   const pw = Math.max(1, Math.round(ew * pr)), ph = Math.max(1, Math.round(h * pr));
-  if (rtL.width !== pw || rtL.height !== ph) { rtL.setSize(pw, ph); rtR.setSize(pw, ph); }
+  fitRT(rtL, pw, ph); fitRT(rtR, pw, ph);
   for (const c of [camL, camR]) { c.fov = S.fov; c.aspect = ew / h; c.updateProjectionMatrix(); }
 
   renderer.setRenderTarget(rtL); renderer.clear(); renderer.render(scene, camL);
   renderer.setRenderTarget(rtR); renderer.clear(); renderer.render(scene, camR);
-  renderer.setRenderTarget(null);
+  renderer.setRenderTarget(null); renderer.setViewport(0, 0, w, h); renderer.clear();
 
-  postMat.uniforms.k1.value = S.k1;
-  postMat.uniforms.k2.value = S.k1 * 0.9;
-  postMat.uniforms.aspect.value = ew / h;
   renderer.setScissorTest(true);
-  // left eye
-  renderer.setViewport(0, 0, ew, h); renderer.setScissor(0, 0, ew, h);
-  postMat.uniforms.tMap.value = rtL.texture; postMat.uniforms.shift.value = S.sp;
-  renderer.render(postScene, postCam);
-  // right eye
-  renderer.setViewport(ew, 0, ew, h); renderer.setScissor(ew, 0, ew, h);
-  postMat.uniforms.tMap.value = rtR.texture; postMat.uniforms.shift.value = -S.sp;
-  renderer.render(postScene, postCam);
+  renderer.setViewport(0, 0, ew, h); renderer.setScissor(0, 0, ew, h); postPass(rtL, S.sp, S.k1, ew / h);   // left eye
+  renderer.setViewport(ew, 0, ew, h); renderer.setScissor(ew, 0, ew, h); postPass(rtR, -S.sp, S.k1, ew / h); // right eye
   renderer.setScissorTest(false);
 }
 renderer.setAnimationLoop(render);
@@ -431,6 +606,8 @@ function syncUI() {
   $('fov').value = S.fov; $('fovV').textContent = S.fov + '°';
   $('k1').value = S.k1; $('k1V').textContent = (+S.k1).toFixed(2);
   $('sp').value = S.sp; $('spV').textContent = (+S.sp).toFixed(3);
+  $('sharp').value = S.sharp; $('sharpV').textContent = Math.round(S.sharp * 100) + '%';
+  $('dwell').checked = S.dwell;
 }
 for (const [id, key] of [['proj', 'proj'], ['stereo', 'stereo']]) {
   $(id).addEventListener('click', e => {
@@ -440,7 +617,8 @@ for (const [id, key] of [['proj', 'proj'], ['stereo', 'stereo']]) {
 }
 $('swap').addEventListener('change', e => { S.swap = e.target.checked; save(); rebuild(); });
 $('fishFov').addEventListener('input', e => { S.fishFov = parseInt(e.target.value, 10); save(); syncUI(); rebuild(); });
-for (const id of ['fov', 'k1', 'sp']) $(id).addEventListener('input', e => { S[id] = parseFloat(e.target.value); save(); syncUI(); });
+$('dwell').addEventListener('change', e => { S.dwell = e.target.checked; save(); });
+for (const id of ['fov', 'k1', 'sp', 'sharp']) $(id).addEventListener('input', e => { S[id] = parseFloat(e.target.value); save(); syncUI(); });
 $('reset').addEventListener('click', () => { S.fov = DEFAULTS.fov; S.k1 = DEFAULTS.k1; S.sp = DEFAULTS.sp; save(); syncUI(); });
 
 function detectFromName(name) {
